@@ -41,8 +41,18 @@ struct device {
 	struct list_head node;
 };
 
+struct tty_session {
+	char mac[13];
+	uint64_t id;
+	char topic_data[128];
+	char topic_disconnect[128];
+	struct mg_connection *nc;
+	struct list_head node;
+};
+
 LIST_HEAD(http_sessions); /* HTTP Session list */
 LIST_HEAD(devices_list); /* devices list */
+LIST_HEAD(tty_sessions); /* tty_session list */
 
 static int check_pass(const char *username, const char *password)
 {
@@ -167,15 +177,185 @@ static int http_login(struct mg_connection *nc, struct http_message *hm)
 	return 1;
 }
 
+/* Creates a new tty session */
+static struct tty_session *create_tty_session(const char *mac, struct mg_connection *nc)
+{
+	unsigned char digest[20];
+	struct tty_session *s = calloc(1, sizeof(struct tty_session));
+	if (!s)
+		return NULL;
+	
+	s->nc = nc;
+	
+	if (mac) {
+		memcpy(s->mac, mac, 12);
+	
+		/* Create an ID by putting various volatiles into a pot and stirring. */
+		cs_sha1_ctx ctx;
+		cs_sha1_init(&ctx);
+		cs_sha1_update(&ctx, (const unsigned char *)s->mac, 12);
+		cs_sha1_update(&ctx, (const unsigned char *)s, sizeof(*s));
+		
+		cs_sha1_final(digest, &ctx);
+		s->id = *((uint64_t *)digest);
+	}
+	list_add(&s->node, &tty_sessions);	
+	return s;
+}
+
+static void destroy_tty_session(struct tty_session *s)
+{
+	list_del(&s->node);
+	free(s);
+}
+
+static struct tty_session *find_tty_session_by_websocket(struct mg_connection *nc)
+{
+	struct tty_session *s;
+	list_for_each_entry(s, &tty_sessions, node) {
+		if (s->nc == nc)
+			return s;
+	}
+	
+	return NULL;
+}
+
+static struct tty_session *find_tty_session_by_sid(uint64_t sid)
+{
+	struct tty_session *s;
+	list_for_each_entry(s, &tty_sessions, node) {
+		if (s->id == sid)
+			return s;
+	}
+	
+	return NULL;
+}
+
+static struct device *find_device_by_mac(const char *mac)
+{
+	struct device *d;
+	list_for_each_entry(d, &devices_list, node) {
+		if (!memcmp(d->mac, mac, 12))
+			return d;
+	}
+	
+	return NULL;
+}
+
 static void http_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 {
 	switch (ev) {
 	case MG_EV_HTTP_REQUEST: {
 			struct http_message *hm = (struct http_message *)ev_data;
+			
 			if (!http_login(nc, hm))
 				return;
 			
+			if (!mg_vcmp(&hm->uri, "/list")) {
+				struct device *d;
+				
+				mg_send_head(nc, 200, -1, NULL);
+				mg_send_http_chunk(nc, "[", 1);
+				
+				list_for_each_entry(d, &devices_list, node) {
+					mg_send_http_chunk(nc, "\"", 1);
+					mg_send_http_chunk(nc, d->mac, 12);
+					mg_send_http_chunk(nc, "\",", 2);
+				}
+				
+				mg_send_http_chunk(nc, "\"\"]", 3);
+				mg_send_http_chunk(nc, NULL, 0);
+				return;
+			}
+			
 			mg_serve_http(nc, hm, http_server_opts); /* Serve static content */
+			break;
+		}
+	case MG_EV_WEBSOCKET_HANDSHAKE_REQUEST: {
+			struct http_message *hm = (struct http_message *)ev_data;
+			char mac[13];
+			if (mg_get_http_var(&hm->query_string, "mac", mac, sizeof(mac)) != 12)
+				create_tty_session(NULL, nc);
+			else
+				create_tty_session(mac, nc);
+			break;
+		}
+	case MG_EV_WEBSOCKET_HANDSHAKE_DONE: {
+			char data[128] = "{\"mt\":\"connect\", \"status\": \"ok\"}";
+			struct device *d = NULL;
+			struct tty_session *s = find_tty_session_by_websocket(nc);
+			if (!s)
+				strncpy(data, "{\"mt\":\"connect\", \"status\": \"error\", \"reason\":\"Unknown error\"}", sizeof(data));
+			else if (!s->mac)
+				strncpy(data, "{\"mt\":\"connect\", \"status\": \"error\", \"reason\":\"Invalid macaddress\"}", sizeof(data));
+			else if (!(d = find_device_by_mac(s->mac)))
+				strncpy(data, "{\"mt\":\"connect\", \"status\": \"error\", \"reason\":\"Device is offline\"}", sizeof(data));
+			
+			mg_send_websocket_frame(nc, WEBSOCKET_OP_TEXT, data, strlen(data));
+			
+			if (d && d->nc) {
+				struct mg_mqtt_topic_expression topic_expr[3];
+				char topic[128];
+				
+				snprintf(topic, sizeof(topic), "xterminal/touser/data/%"INT64_X_FMT, s->id);
+				topic_expr[0].topic = strdup(topic);
+				topic_expr[0].qos = 0;
+				
+				snprintf(topic, sizeof(topic), "xterminal/touser/disconnect/%"INT64_X_FMT, s->id);
+				topic_expr[1].topic = strdup(topic);
+				topic_expr[1].qos = 0;
+				
+				snprintf(topic, sizeof(topic), "xterminal/uploadfilefinish/%"INT64_X_FMT, s->id);
+				topic_expr[2].topic = strdup(topic);
+				topic_expr[2].qos = 0;
+			
+				mg_mqtt_subscribe(d->nc, topic_expr, 3, 0);
+				free((void *)topic_expr[0].topic);
+				free((void *)topic_expr[1].topic);
+				free((void *)topic_expr[2].topic);
+				
+				snprintf(topic, sizeof(topic), "xterminal/connect/%s/%"INT64_X_FMT, d->mac, s->id);
+				mg_mqtt_publish(d->nc, topic, 0, 0, NULL, 0);
+				
+				snprintf(s->topic_data, sizeof(s->topic_data), "xterminal/todev/data/%"INT64_X_FMT, s->id);
+				snprintf(s->topic_disconnect, sizeof(s->topic_disconnect), "xterminal/todev/disconnect/%"INT64_X_FMT, s->id);
+			}
+			break;
+		}
+	case MG_EV_WEBSOCKET_FRAME: {
+			struct websocket_message *wm = (struct websocket_message *)ev_data;
+			struct device *d;
+			struct tty_session *s = find_tty_session_by_websocket(nc);
+			if (!s) {
+				mg_send_websocket_frame(nc, WEBSOCKET_OP_CLOSE, NULL, 0);
+				return;
+			}
+			
+			d = find_device_by_mac(s->mac);
+			if (!d) {
+				mg_send_websocket_frame(nc, WEBSOCKET_OP_CLOSE, NULL, 0);
+				return;
+			}
+			
+			if (wm->flags & WEBSOCKET_OP_TEXT) {
+			} else if (wm->flags & WEBSOCKET_OP_BINARY) {
+				mg_mqtt_publish(d->nc, s->topic_data, 0, 0, wm->data, wm->size);
+			}
+			
+			break;
+		}
+	case MG_EV_CLOSE: {
+			if (nc->flags & MG_F_IS_WEBSOCKET) {
+				struct tty_session *s = find_tty_session_by_websocket(nc);
+				if (s) {
+					struct device *d = find_device_by_mac(s->mac);
+					if (d)
+						mg_mqtt_publish(d->nc, s->topic_disconnect, 0, 0, NULL, 0);
+					destroy_tty_session(s);
+					
+					printf("session close\n");
+				}
+			}
 			break;
 		}
 	}
@@ -269,12 +449,26 @@ static void mqtt_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 
 	case MG_EV_MQTT_PUBLISH: {
 			struct mg_mqtt_message *msg = (struct mg_mqtt_message *)ev_data;
+			char ssid[21] = "";
+			struct tty_session *s;
+			
+			//printf("Got incoming message %.*s: %.*s\n", (int) msg->topic.len, msg->topic.p, (int) msg->payload.len, msg->payload.p);
 			
 			if (memmem(msg->topic.p + 9, msg->topic.len - 9, "heartbeat", strlen("heartbeat"))) {
-				
 				update_device(msg->topic.p + 11 + strlen("heartbeat"), nc);
+			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "touser/data", strlen("touser/data"))) {
+				memcpy(ssid, msg->topic.p + 11 + strlen("touser/data"), 16);
+				s = find_tty_session_by_sid(strtoull(ssid, NULL, 16));
+				if (s)
+					mg_send_websocket_frame(s->nc, WEBSOCKET_OP_BINARY, msg->payload.p, msg->payload.len);
+			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "touser/disconnect", strlen("touser/disconnect"))) {
+				memcpy(ssid, msg->topic.p + 11 + strlen("touser/disconnect"), 16);
+				s = find_tty_session_by_sid(strtoull(ssid, NULL, 16));
+				if (s) {
+					mg_send_websocket_frame(s->nc, WEBSOCKET_OP_CLOSE, NULL, 0);
+					destroy_tty_session(s);
+				}
 			}
-			
 			break;
 		}
 	}
