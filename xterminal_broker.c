@@ -251,6 +251,11 @@ static void http_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 	case MG_EV_HTTP_REQUEST: {
 			struct http_message *hm = (struct http_message *)ev_data;
 			
+			if (uploadfile_name[0] && !strncmp(hm->uri.p + 1, uploadfile_name, strlen(uploadfile_name))) {
+				mg_serve_http(nc, hm, http_server_opts); 
+				return;
+			}
+			
 			if (!http_login(nc, hm))
 				return;
 			
@@ -558,7 +563,18 @@ static void mqtt_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 					mg_send_websocket_frame(s->nc, WEBSOCKET_OP_CLOSE, NULL, 0);
 					destroy_tty_session(s);
 				}
+			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "uploadfilefinish", strlen("uploadfilefinish"))) {
+				if (uploadfile_name[0]) {
+					int ret;
+					char cmd[128] = "";
+					snprintf(cmd, sizeof(cmd), "rm -f %s/%s", http_server_opts.document_root, uploadfile_name);
+					ret = system(cmd);
+					if (ret < 0)
+						syslog(LOG_ERR, "system failed(%s)(%s)", cmd, strerror(errno));
+					uploadfile_name[0] = 0;
+				}
 			}
+			
 			break;
 		}
 	}
