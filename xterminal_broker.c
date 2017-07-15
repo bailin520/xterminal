@@ -46,6 +46,7 @@ struct tty_session {
 	uint64_t id;
 	char topic_data[128];
 	char topic_disconnect[128];
+	char topic_upfile[128];
 	struct mg_connection *nc;
 	struct list_head node;
 };
@@ -53,6 +54,8 @@ struct tty_session {
 LIST_HEAD(http_sessions); /* HTTP Session list */
 LIST_HEAD(devices_list); /* devices list */
 LIST_HEAD(tty_sessions); /* tty_session list */
+
+static char uploadfile_name[128];
 
 static int check_pass(const char *username, const char *password)
 {
@@ -319,6 +322,7 @@ static void http_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 				
 				snprintf(s->topic_data, sizeof(s->topic_data), "xterminal/todev/data/%"INT64_X_FMT, s->id);
 				snprintf(s->topic_disconnect, sizeof(s->topic_disconnect), "xterminal/todev/disconnect/%"INT64_X_FMT, s->id);
+				snprintf(s->topic_upfile, sizeof(s->topic_upfile), "xterminal/uploadfile/%"INT64_X_FMT, s->id);
 			}
 			break;
 		}
@@ -338,12 +342,98 @@ static void http_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 			}
 			
 			if (wm->flags & WEBSOCKET_OP_TEXT) {
+				if (memmem(wm->data, wm->size, "upfile", strlen("upfile"))) {
+					char data[256] = "";
+					
+					memcpy(data, wm->data + strlen("upfile "), wm->size - strlen("upfile "));
+					strcat(data, " ");
+					strcat(data, uploadfile_name);
+					
+					mg_mqtt_publish(d->nc, s->topic_upfile, 0, 0, data, strlen(data));
+				}
 			} else if (wm->flags & WEBSOCKET_OP_BINARY) {
 				mg_mqtt_publish(d->nc, s->topic_data, 0, 0, wm->data, wm->size);
 			}
 			
 			break;
 		}
+	case MG_EV_HTTP_PART_BEGIN: {
+			struct mg_http_multipart_part *mp = (struct mg_http_multipart_part *)ev_data;
+			struct file_upload_state *fus = calloc(1, sizeof(struct file_upload_state));
+			
+			mp->user_data = NULL;
+			fus->lfn = calloc(1, strlen("/tmp/") + strlen(mp->file_name) + 1);
+			strcpy(fus->lfn, "/tmp/");
+			strcpy(fus->lfn + strlen("/tmp/"), mp->file_name);
+
+			fus->fp = fopen(fus->lfn, "w");
+			if (fus->fp == NULL) {
+				mg_printf(nc, "HTTP/1.1 500 Internal Server Error\r\n"
+								"Content-Type: text/plain\r\n"
+								"Connection: close\r\n\r\n");
+				mg_printf(nc, "Failed to open %s: %d\n", fus->lfn, errno);
+				/* Do not close the connection just yet, discard remainder of the data.
+				* This is because at the time of writing some browsers (Chrome) fail to
+				* render response before all the data is sent. */
+			}
+			mp->user_data = (void *) fus;
+			break;
+		}
+	case MG_EV_HTTP_PART_DATA: {
+		struct mg_http_multipart_part *mp = (struct mg_http_multipart_part *)ev_data;
+		struct file_upload_state *fus = (struct file_upload_state *)mp->user_data;
+
+		if (!fus || !fus->fp) break;
+		if (fwrite(mp->data.p, 1, mp->data.len, fus->fp) != mp->data.len) {
+			if (errno == ENOSPC) {
+				mg_printf(nc, "HTTP/1.1 413 Payload Too Large\r\n"
+								"Content-Type: text/plain\r\n"
+								"Connection: close\r\n\r\n");
+				mg_printf(nc, "Failed to write to %s: no space left; wrote %d\r\n", fus->lfn, (int)fus->num_recd);
+			} else {
+				mg_printf(nc, "HTTP/1.1 500 Internal Server Error\r\n"
+                   	 			"Content-Type: text/plain\r\n"
+                    			"Connection: close\r\n\r\n");
+          		mg_printf(nc, "Failed to write to %s: %d, wrote %d", mp->file_name, errno, (int)fus->num_recd);
+			}
+			fclose(fus->fp);
+			remove(fus->lfn);
+			fus->fp = NULL;
+			/* Do not close the connection just yet, discard remainder of the data.
+			 * This is because at the time of writing some browsers (Chrome) fail to
+			 * render response before all the data is sent. */
+			return;
+		}
+		fus->num_recd += mp->data.len;
+		break;
+	}
+	case MG_EV_HTTP_PART_END: {
+		struct mg_http_multipart_part *mp = (struct mg_http_multipart_part *)ev_data;
+		struct file_upload_state *fus = (struct file_upload_state *)mp->user_data;
+		
+		nc->flags |= MG_F_SEND_AND_CLOSE;
+		
+		if (fus) {
+			if (mp->status >= 0 && fus->fp) {
+				char buf[128] = "";
+				strncpy(uploadfile_name, mp->file_name, sizeof(uploadfile_name));
+				snprintf(buf, sizeof(buf), "%s/%s", http_server_opts.document_root, mp->file_name);
+				rename(fus->lfn, buf);
+				
+				mg_printf(nc, "HTTP/1.1 200 OK\r\n"
+								"Content-Type: text/plain\r\n"
+								"Connection: close\r\n\r\n"
+								"Ok, %s - %d bytes.\r\n",
+								mp->file_name, (int)fus->num_recd);
+			}else {
+				/* mp->status < 0 means connection was terminated, so no reason to send HTTP reply */
+			}
+			free(fus->lfn);
+			free(fus);
+			mp->user_data = NULL;
+		}
+		break;
+	}
 	case MG_EV_CLOSE: {
 			if (nc->flags & MG_F_IS_WEBSOCKET) {
 				struct tty_session *s = find_tty_session_by_websocket(nc);
