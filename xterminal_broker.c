@@ -26,22 +26,23 @@ static struct mg_serve_http_opts http_server_opts = {
 
 /* HTTP Session information structure. */
 struct http_session {
-	/* Session ID. Must be unique and hard to guess. */
 	uint64_t id;
-	/*
-	* Time when the session was created and time of last activity.
-	* Used to clean up stale sessions.
-	*/
-	double created;
-	double last_used; /* Time when the session was last active. */
-
-	/* User name this session is associated with. */
+	double last_used;
 	char *username;
-	
+	struct list_head node;
+};
+
+#define DEVICE_TTL	30.0
+
+struct device {
+	char mac[13];
+	int last_active;
+	struct mg_connection *nc;
 	struct list_head node;
 };
 
 LIST_HEAD(http_sessions); /* HTTP Session list */
+LIST_HEAD(devices_list); /* devices list */
 
 static int check_pass(const char *username, const char *password)
 {
@@ -105,7 +106,7 @@ static struct http_session *create_http_session(const char *username, const stru
 		return NULL;
 	
 	/* Initialize new session. */
-	s->created = s->last_used = mg_time();
+	s->last_used = mg_time();
 	s->username = strdup(username);
 	
 	/* Create an ID by putting various volatiles into a pot and stirring. */
@@ -187,8 +188,44 @@ static void http_session_timer_cb(struct ev_loop *loop, ev_timer *w, int revents
 	
 	list_for_each_entry_safe(s, tmp, &http_sessions, node) {
 		if (s->id && s->last_used < threshold) {
-			printf("session timeoud:%"INT64_X_FMT"\n", s->id);
 			destroy_http_session(s);
+		}
+	}
+}
+
+static void update_device(const char *mac, struct mg_connection *nc)
+{
+	struct device *d;
+	
+	list_for_each_entry(d, &devices_list, node) {
+		if (!memcmp(d->mac, mac, 12)) {
+			d->last_active = mg_time();
+			return;
+		}
+	}
+	
+	d = calloc(1, sizeof(struct device));
+	if (!d)
+		return;
+	
+	d->last_active = mg_time();
+	d->nc = nc;
+	memcpy(d->mac, mac, 12);
+	list_add(&d->node, &devices_list);
+	
+	syslog(LOG_INFO, "new dev:[%s]", d->mac);
+}
+
+static void device_timer_cb(struct ev_loop *loop, ev_timer *w, int revents)
+{
+	struct device *d, *tmp;
+	double threshold = mg_time() - DEVICE_TTL;
+	
+	list_for_each_entry_safe(d, tmp, &devices_list, node) {
+		if (d->last_active < threshold) {
+			syslog(LOG_INFO, "dev [%s] offline", d->mac);
+			list_del(&d->node);
+			free(d);
 		}
 	}
 }
@@ -216,12 +253,27 @@ static void mqtt_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 		}
 
 	case MG_EV_MQTT_CONNACK: {
-
+			struct mg_mqtt_message *msg = (struct mg_mqtt_message *)ev_data;
+			struct mg_mqtt_topic_expression topic_expr = {
+				.topic = "xterminal/heartbeat/+"
+			};
+			
+			if (msg->connack_ret_code != MG_EV_MQTT_CONNACK_ACCEPTED) {
+				syslog(LOG_ERR, "Got mqtt connection error: %d", msg->connack_ret_code);
+				return;
+			}
+			
+			mg_mqtt_subscribe(nc, &topic_expr, 1, 0);
 			break;
 		}
 
 	case MG_EV_MQTT_PUBLISH: {
-
+			struct mg_mqtt_message *msg = (struct mg_mqtt_message *)ev_data;
+			
+			if (memmem(msg->topic.p + 9, msg->topic.len - 9, "heartbeat", strlen("heartbeat"))) {
+				
+				update_device(msg->topic.p + 11 + strlen("heartbeat"), nc);
+			}
 			
 			break;
 		}
@@ -257,6 +309,7 @@ int main(int argc, char *argv[])
 	int http_auth_cnt = 1;
 	struct mg_bind_opts bind_opts;
 	static ev_timer http_session_timer;
+	static ev_timer device_timer;
 	
 	struct mg_mgr mgr;
 	struct mg_connection *nc;
@@ -333,6 +386,9 @@ int main(int argc, char *argv[])
 	
 	ev_timer_init(&http_session_timer, http_session_timer_cb, 5, 5);
 	ev_timer_start(loop, &http_session_timer);
+	
+	ev_timer_init(&device_timer, device_timer_cb, 5, 5);
+	ev_timer_start(loop, &device_timer);
 	
 	ev_run(loop, 0);
 
