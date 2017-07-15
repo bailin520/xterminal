@@ -12,4 +12,4 @@ add_executable(xterminal_broker xterminal_broker.c)
 target_link_libraries(xterminal_broker evmongoose ev)
 
 add_executable(xterminal_device xterminal_device.c)
-target_link_libraries(xterminal_device evmongoose ev)
+target_link_libraries(xterminal_device evmongoose ev util)

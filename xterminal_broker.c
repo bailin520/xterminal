@@ -6,8 +6,6 @@
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <sys/wait.h>
-#include <signal.h>
 #include "list.h"
 
 void *memmem(const void *haystack, size_t haystacklen, const void *needle, size_t needlelen);

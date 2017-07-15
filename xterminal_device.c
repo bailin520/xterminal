@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include "list.h"
 
 void *memmem(const void *haystack, size_t haystacklen, const void *needle, size_t needlelen);
 					
@@ -15,6 +16,104 @@ static char broker[128];
 static char dev_id[13];
 static char heartbeat_topic[128];
 static ev_timer heartbeat_timer;
+
+LIST_HEAD(tty_sessions); /* tty_session list */
+
+struct tty_session {
+	pid_t pid;
+	int pty;
+	uint64_t sid;
+	struct mg_connection *nc;
+	ev_io iow;
+	ev_io ior;
+	struct mbuf send_mbuf;
+	char topic_data[128];
+	char topic_disconnect[128];
+	struct list_head node;
+};
+
+static void ev_read_cb(struct ev_loop *loop, ev_io *w, int revents)
+{
+	char buf[1024];
+	int len;
+	struct tty_session *s = (struct tty_session *)w->data;
+	
+	len = read(w->fd, buf, sizeof(buf));
+	if (len > 0) {
+		mg_mqtt_publish(s->nc, s->topic_data, 0, 0, buf, len);
+	} else {
+		ev_io_stop(loop, w);
+		waitpid(s->pid, NULL, 0);
+		mg_mqtt_publish(s->nc, s->topic_disconnect, 0, 0, NULL, 0);
+	}
+}
+
+static struct tty_session *create_tty_session(struct mg_connection *nc, uint64_t sid)
+{
+	int pty;
+	pid_t pid;
+	struct tty_session *s;
+	struct mg_mqtt_topic_expression topic_expr[3];
+	char topic[128];
+				
+	s = calloc(1, sizeof(struct tty_session));
+	if (!s)
+		return NULL;
+	
+	pid = forkpty(&pty, NULL, NULL, NULL);
+	if (pid == 0)
+		execl("/bin/login", "/bin/login", NULL);
+	
+	s->sid = sid;
+	s->pid = pid;
+	s->pty = pty;
+	s->nc = nc;
+	list_add(&s->node, &tty_sessions);
+	
+	snprintf(topic, sizeof(topic), "xterminal/todev/data/%"INT64_X_FMT, s->sid);
+	topic_expr[0].topic = strdup(topic);
+	topic_expr[0].qos = 0;
+	
+	snprintf(topic, sizeof(topic), "xterminal/todev/disconnect/%"INT64_X_FMT, s->sid);
+	topic_expr[1].topic = strdup(topic);
+	topic_expr[1].qos = 0;
+	
+	snprintf(topic, sizeof(topic), "xterminal/uploadfile/%"INT64_X_FMT, s->sid);
+	topic_expr[2].topic = strdup(topic);
+	topic_expr[2].qos = 0;
+	
+	mg_mqtt_subscribe(nc, topic_expr, 3, 0);
+	free((void *)topic_expr[0].topic);
+	free((void *)topic_expr[1].topic);
+	free((void *)topic_expr[2].topic);
+	
+	snprintf(s->topic_data, sizeof(s->topic_data), "xterminal/touser/data/%"INT64_X_FMT, s->sid);
+	snprintf(s->topic_disconnect, sizeof(s->topic_disconnect), "xterminal/touser/disconnect/%"INT64_X_FMT, s->sid);
+	
+	ev_io_init(&s->ior, ev_read_cb, s->pty, EV_READ);
+	s->ior.data = s;
+	ev_io_start(nc->mgr->loop, &s->ior);
+	return s;
+}
+
+static struct tty_session *find_tty_session_by_sid(uint64_t sid)
+{
+	struct tty_session *s;
+	list_for_each_entry(s, &tty_sessions, node) {
+		if (s->sid == sid)
+			return s;
+	}
+	
+	return NULL;
+}
+
+static void destroy_tty_session(struct ev_loop *loop, struct tty_session *s)
+{
+	ev_io_stop(loop, &s->ior);
+	kill(s->pid, SIGKILL);
+	list_del(&s->node);
+	free(s);
+}
 
 static void heartbeat_timer_cb(struct ev_loop *loop, ev_timer *w, int revents)
 {
@@ -62,15 +161,32 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 
 	case MG_EV_MQTT_PUBLISH: {
 			struct mg_mqtt_message *msg = (struct mg_mqtt_message *)ev_data;
-			static char id[11];
+			char ssid[21] = "";
+			uint64_t sid;
+			struct tty_session *s;
+			
+			//printf("Got incoming message %.*s: %.*s\n", (int) msg->topic.len, msg->topic.p, (int) msg->payload.len, msg->payload.p);
 			
 			if (memmem(msg->topic.p + 9, msg->topic.len - 9, "connect", strlen("connect"))) {
-				memcpy(id, msg->topic.p + 9, 10);
-				printf("id = [%s]\n", id);
+				memcpy(ssid, msg->topic.p + 31, 16);
+				sid = strtoull(ssid, NULL, 16);
+				create_tty_session(nc, sid);
 			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "todev/data", strlen("todev/data"))) {
-				
+				memcpy(ssid, msg->topic.p + 21, 16);
+				sid = strtoull(ssid, NULL, 16);
+				s = find_tty_session_by_sid(sid);
+				if (s) {
+					int ret = write(s->pty, msg->payload.p, msg->payload.len);
+					if (ret < 0) {
+						syslog(LOG_ERR, "write error:%s", strerror(errno));
+					}
+				}
 			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "todev/disconnect", strlen("todev/disconnect"))) {
-				
+				memcpy(ssid, msg->topic.p + 27, 16);
+				sid = strtoull(ssid, NULL, 16);
+				s = find_tty_session_by_sid(sid);
+				if (s)
+					destroy_tty_session(nc->mgr->loop, s);
 			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "uploadfile", strlen("uploadfile"))) {
 				
 			}
