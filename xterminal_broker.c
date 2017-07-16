@@ -24,7 +24,7 @@ static struct mg_serve_http_opts http_server_opts = {
 
 /* HTTP Session information structure. */
 struct http_session {
-	uint64_t id;
+	char sid[33];
 	double last_used;
 	char *username;
 	struct list_head node;
@@ -41,7 +41,7 @@ struct device {
 
 struct tty_session {
 	char mac[13];
-	uint64_t id;
+	char sid[33];
 	char topic_data[128];
 	char topic_disconnect[128];
 	char topic_upfile[128];
@@ -69,28 +69,20 @@ static int check_pass(const char *username, const char *password)
 	return 0;
 }
 
-
-/*
- * Parses the session cookie and returns a pointer to the session struct
- * or NULL if not found.
- */
 static struct http_session *get_http_session(struct http_message *hm)
 {
-	char ssid[21];
-	uint64_t sid;
+	char sid[33];
 	struct http_session *s;
 	struct mg_str *cookie_header = mg_get_http_header(hm, "cookie");
 	
 	if (cookie_header == NULL)
 		return NULL;
 	
-	if (!mg_http_parse_header(cookie_header, HTTP_SESSION_COOKIE_NAME, ssid, sizeof(ssid)))
+	if (!mg_http_parse_header(cookie_header, HTTP_SESSION_COOKIE_NAME, sid, sizeof(sid)))
 		return NULL;
 	
-	sid = strtoull(ssid, NULL, 16);
-	
 	list_for_each_entry(s, &http_sessions, node) {
-		if (s->id == sid) {
+		if (!memcmp(s->sid, sid, 32)) {
 			s->last_used = mg_time();
 			return s;
 		}
@@ -110,10 +102,12 @@ static void destroy_http_session(struct http_session *s)
 /* Creates a new http session for the user. */
 static struct http_session *create_http_session(const char *username, const struct http_message *hm)
 {
-	cs_sha1_ctx ctx;
-	unsigned char digest[20];
-	/* Find first available slot or use the oldest one. */
-	struct http_session *s = calloc(1, sizeof(struct http_session));
+	MD5_CTX ctx;
+	unsigned char hash[16];
+	char cs[33] = "";
+	struct http_session *s;
+	
+	s = calloc(1, sizeof(struct http_session));
 	if (!s)
 		return NULL;
 	
@@ -121,12 +115,13 @@ static struct http_session *create_http_session(const char *username, const stru
 	s->last_used = mg_time();
 	s->username = strdup(username);
 	
-	cs_sha1_init(&ctx);
-	cs_sha1_update(&ctx, (const unsigned char *)hm->message.p, hm->message.len);
-	cs_sha1_update(&ctx, (const unsigned char *)s, sizeof(*s));
+	MD5_Init(&ctx);
+	MD5_Update(&ctx, (const unsigned char *)hm->message.p, hm->message.len);
+	MD5_Update(&ctx, (const unsigned char *)s, sizeof(*s));
 	
-	cs_sha1_final(digest, &ctx);
-	s->id = *((uint64_t *)digest);
+	MD5_Final(hash, &ctx);
+	cs_to_hex(cs, hash, sizeof(hash));
+	memcpy(s->sid, cs, 32);
 
 	list_add(&s->node, &http_sessions);
 	
@@ -161,7 +156,7 @@ static int http_login(struct mg_connection *nc, struct http_message *hm)
 					return 0;
 				}
 				
-				snprintf(shead, sizeof(shead), "Set-Cookie: %s=%" INT64_X_FMT "; path=/", HTTP_SESSION_COOKIE_NAME, s->id);
+				snprintf(shead, sizeof(shead), "Set-Cookie: %s=%s; path=/", HTTP_SESSION_COOKIE_NAME, s->sid);
 				mg_http_send_redirect(nc, 302, mg_mk_str("/"), mg_mk_str(shead));
 				return 0;
 			}
@@ -180,7 +175,6 @@ static int http_login(struct mg_connection *nc, struct http_message *hm)
 /* Creates a new tty session */
 static struct tty_session *create_tty_session(const char *mac, struct mg_connection *nc)
 {
-	unsigned char digest[20];
 	struct tty_session *s = calloc(1, sizeof(struct tty_session));
 	if (!s)
 		return NULL;
@@ -188,16 +182,19 @@ static struct tty_session *create_tty_session(const char *mac, struct mg_connect
 	s->nc = nc;
 	
 	if (mac) {
+		MD5_CTX ctx;
+		unsigned char hash[16];
+		char cs[33] = "";
+		
 		memcpy(s->mac, mac, 12);
 	
-		/* Create an ID by putting various volatiles into a pot and stirring. */
-		cs_sha1_ctx ctx;
-		cs_sha1_init(&ctx);
-		cs_sha1_update(&ctx, (const unsigned char *)s->mac, 12);
-		cs_sha1_update(&ctx, (const unsigned char *)s, sizeof(*s));
+		MD5_Init(&ctx);
+		MD5_Update(&ctx, (const unsigned char *)s->mac, 12);
+		MD5_Update(&ctx, (const unsigned char *)s, sizeof(*s));
 		
-		cs_sha1_final(digest, &ctx);
-		s->id = *((uint64_t *)digest);
+		MD5_Final(hash, &ctx);
+		cs_to_hex(cs, hash, sizeof(hash));
+		memcpy(s->sid, cs, 32);
 	}
 	list_add(&s->node, &tty_sessions);	
 	return s;
@@ -220,11 +217,11 @@ static struct tty_session *find_tty_session_by_websocket(struct mg_connection *n
 	return NULL;
 }
 
-static struct tty_session *find_tty_session_by_sid(uint64_t sid)
+static struct tty_session *find_tty_session_by_sid(const char *sid)
 {
 	struct tty_session *s;
 	list_for_each_entry(s, &tty_sessions, node) {
-		if (s->id == sid)
+		if (!memcmp(s->sid, sid, 32))
 			return s;
 	}
 	
@@ -301,15 +298,15 @@ static void http_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 				struct mg_mqtt_topic_expression topic_expr[3];
 				char topic[128];
 				
-				snprintf(topic, sizeof(topic), "xterminal/touser/data/%"INT64_X_FMT, s->id);
+				snprintf(topic, sizeof(topic), "xterminal/touser/data/%s", s->sid);
 				topic_expr[0].topic = strdup(topic);
 				topic_expr[0].qos = 0;
 				
-				snprintf(topic, sizeof(topic), "xterminal/touser/disconnect/%"INT64_X_FMT, s->id);
+				snprintf(topic, sizeof(topic), "xterminal/touser/disconnect/%s", s->sid);
 				topic_expr[1].topic = strdup(topic);
 				topic_expr[1].qos = 0;
 				
-				snprintf(topic, sizeof(topic), "xterminal/uploadfilefinish/%"INT64_X_FMT, s->id);
+				snprintf(topic, sizeof(topic), "xterminal/uploadfilefinish/%s", s->sid);
 				topic_expr[2].topic = strdup(topic);
 				topic_expr[2].qos = 0;
 			
@@ -318,12 +315,12 @@ static void http_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 				free((void *)topic_expr[1].topic);
 				free((void *)topic_expr[2].topic);
 				
-				snprintf(topic, sizeof(topic), "xterminal/connect/%s/%"INT64_X_FMT, d->mac, s->id);
+				snprintf(topic, sizeof(topic), "xterminal/connect/%s/%s", d->mac, s->sid);
 				mg_mqtt_publish(d->nc, topic, 0, 0, NULL, 0);
 				
-				snprintf(s->topic_data, sizeof(s->topic_data), "xterminal/todev/data/%"INT64_X_FMT, s->id);
-				snprintf(s->topic_disconnect, sizeof(s->topic_disconnect), "xterminal/todev/disconnect/%"INT64_X_FMT, s->id);
-				snprintf(s->topic_upfile, sizeof(s->topic_upfile), "xterminal/uploadfile/%"INT64_X_FMT, s->id);
+				snprintf(s->topic_data, sizeof(s->topic_data), "xterminal/todev/data/%s", s->sid);
+				snprintf(s->topic_disconnect, sizeof(s->topic_disconnect), "xterminal/todev/disconnect/%s", s->sid);
+				snprintf(s->topic_upfile, sizeof(s->topic_upfile), "xterminal/uploadfile/%s", s->sid);
 			}
 			break;
 		}
@@ -458,7 +455,7 @@ static void http_session_timer_cb(struct ev_loop *loop, ev_timer *w, int revents
 	double threshold = mg_time() - HTTP_SESSION_TTL;
 	
 	list_for_each_entry_safe(s, tmp, &http_sessions, node) {
-		if (s->id && s->last_used < threshold) {
+		if (s->last_used < threshold) {
 			destroy_http_session(s);
 		}
 	}
@@ -540,7 +537,7 @@ static void mqtt_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 
 	case MG_EV_MQTT_PUBLISH: {
 			struct mg_mqtt_message *msg = (struct mg_mqtt_message *)ev_data;
-			char ssid[21] = "";
+			char sid[33] = "";
 			struct tty_session *s;
 			
 			//printf("Got incoming message %.*s: %.*s\n", (int) msg->topic.len, msg->topic.p, (int) msg->payload.len, msg->payload.p);
@@ -548,13 +545,13 @@ static void mqtt_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 			if (memmem(msg->topic.p + 9, msg->topic.len - 9, "heartbeat", strlen("heartbeat"))) {
 				update_device(msg->topic.p + 11 + strlen("heartbeat"), nc);
 			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "touser/data", strlen("touser/data"))) {
-				memcpy(ssid, msg->topic.p + 11 + strlen("touser/data"), 16);
-				s = find_tty_session_by_sid(strtoull(ssid, NULL, 16));
+				memcpy(sid, msg->topic.p + 11 + strlen("touser/data"), 32);
+				s = find_tty_session_by_sid(sid);
 				if (s)
 					mg_send_websocket_frame(s->nc, WEBSOCKET_OP_BINARY, msg->payload.p, msg->payload.len);
 			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "touser/disconnect", strlen("touser/disconnect"))) {
-				memcpy(ssid, msg->topic.p + 11 + strlen("touser/disconnect"), 16);
-				s = find_tty_session_by_sid(strtoull(ssid, NULL, 16));
+				memcpy(sid, msg->topic.p + 11 + strlen("touser/disconnect"), 32);
+				s = find_tty_session_by_sid(sid);
 				if (s) {
 					mg_send_websocket_frame(s->nc, WEBSOCKET_OP_CLOSE, NULL, 0);
 					destroy_tty_session(s);

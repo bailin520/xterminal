@@ -22,7 +22,7 @@ LIST_HEAD(tty_sessions); /* tty_session list */
 struct tty_session {
 	pid_t pid;
 	int pty;
-	uint64_t sid;
+	char sid[33];
 	struct mg_connection *nc;
 	ev_io iow;
 	ev_io ior;
@@ -68,7 +68,7 @@ static void ev_read_cb(struct ev_loop *loop, ev_io *w, int revents)
 	}
 }
 
-static struct tty_session *create_tty_session(struct mg_connection *nc, uint64_t sid)
+static struct tty_session *create_tty_session(struct mg_connection *nc, const char *sid)
 {
 	int pty;
 	pid_t pid;
@@ -84,21 +84,22 @@ static struct tty_session *create_tty_session(struct mg_connection *nc, uint64_t
 	if (pid == 0)
 		execl("/bin/login", "/bin/login", NULL);
 	
-	s->sid = sid;
 	s->pid = pid;
 	s->pty = pty;
 	s->nc = nc;
+	memcpy(s->sid, sid, 32);
+	
 	list_add(&s->node, &tty_sessions);
 	
-	snprintf(topic, sizeof(topic), "xterminal/todev/data/%"INT64_X_FMT, s->sid);
+	snprintf(topic, sizeof(topic), "xterminal/todev/data/%s", s->sid);
 	topic_expr[0].topic = strdup(topic);
 	topic_expr[0].qos = 0;
 	
-	snprintf(topic, sizeof(topic), "xterminal/todev/disconnect/%"INT64_X_FMT, s->sid);
+	snprintf(topic, sizeof(topic), "xterminal/todev/disconnect/%s", s->sid);
 	topic_expr[1].topic = strdup(topic);
 	topic_expr[1].qos = 0;
 	
-	snprintf(topic, sizeof(topic), "xterminal/uploadfile/%"INT64_X_FMT, s->sid);
+	snprintf(topic, sizeof(topic), "xterminal/uploadfile/%s", s->sid);
 	topic_expr[2].topic = strdup(topic);
 	topic_expr[2].qos = 0;
 	
@@ -107,9 +108,9 @@ static struct tty_session *create_tty_session(struct mg_connection *nc, uint64_t
 	free((void *)topic_expr[1].topic);
 	free((void *)topic_expr[2].topic);
 	
-	snprintf(s->topic_data, sizeof(s->topic_data), "xterminal/touser/data/%"INT64_X_FMT, s->sid);
-	snprintf(s->topic_disconnect, sizeof(s->topic_disconnect), "xterminal/touser/disconnect/%"INT64_X_FMT, s->sid);
-	snprintf(s->topic_upfile, sizeof(s->topic_upfile), "xterminal/uploadfilefinish/%"INT64_X_FMT, s->sid);
+	snprintf(s->topic_data, sizeof(s->topic_data), "xterminal/touser/data/%s", s->sid);
+	snprintf(s->topic_disconnect, sizeof(s->topic_disconnect), "xterminal/touser/disconnect/%s", s->sid);
+	snprintf(s->topic_upfile, sizeof(s->topic_upfile), "xterminal/uploadfilefinish/%s", s->sid);
 	
 	ev_io_init(&s->ior, ev_read_cb, s->pty, EV_READ);
 	s->ior.data = s;
@@ -117,11 +118,11 @@ static struct tty_session *create_tty_session(struct mg_connection *nc, uint64_t
 	return s;
 }
 
-static struct tty_session *find_tty_session_by_sid(uint64_t sid)
+static struct tty_session *find_tty_session_by_sid(const char *sid)
 {
 	struct tty_session *s;
 	list_for_each_entry(s, &tty_sessions, node) {
-		if (s->sid == sid)
+		if (!memcmp(s->sid, sid, 32))
 			return s;
 	}
 	
@@ -221,25 +222,21 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 
 	case MG_EV_MQTT_PUBLISH: {
 			struct mg_mqtt_message *msg = (struct mg_mqtt_message *)ev_data;
-			char ssid[21] = "";
-			uint64_t sid;
+			char sid[33] = "";
 			struct tty_session *s;
 			
 			//printf("Got incoming message %.*s: %.*s\n", (int) msg->topic.len, msg->topic.p, (int) msg->payload.len, msg->payload.p);
 			
 			if (memmem(msg->topic.p + 9, msg->topic.len - 9, "todev/disconnect", strlen("todev/disconnect"))) {
-				memcpy(ssid, msg->topic.p + 27, 16);
-				sid = strtoull(ssid, NULL, 16);
+				memcpy(sid, msg->topic.p + 27, 32);
 				s = find_tty_session_by_sid(sid);
 				if (s)
 					destroy_tty_session(nc->mgr->loop, s);
 			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "connect", strlen("connect"))) {
-				memcpy(ssid, msg->topic.p + 31, 16);
-				sid = strtoull(ssid, NULL, 16);
+				memcpy(sid, msg->topic.p + 31, 32);
 				create_tty_session(nc, sid);
 			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "todev/data", strlen("todev/data"))) {
-				memcpy(ssid, msg->topic.p + 21, 16);
-				sid = strtoull(ssid, NULL, 16);
+				memcpy(sid, msg->topic.p + 21, 32);
 				s = find_tty_session_by_sid(sid);
 				if (s) {
 					int ret = write(s->pty, msg->payload.p, msg->payload.len);
@@ -251,8 +248,7 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 				char *p, url[128] = "";
 				struct mg_connection *ncc;
 				
-				memcpy(ssid, msg->topic.p + 21, 16);
-				sid = strtoull(ssid, NULL, 16);
+				memcpy(sid, msg->topic.p + 21, 32);
 				s = find_tty_session_by_sid(sid);
 				if (!s)
 					return;
