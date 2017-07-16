@@ -110,6 +110,7 @@ static void destroy_http_session(struct http_session *s)
 /* Creates a new http session for the user. */
 static struct http_session *create_http_session(const char *username, const struct http_message *hm)
 {
+	cs_sha1_ctx ctx;
 	unsigned char digest[20];
 	/* Find first available slot or use the oldest one. */
 	struct http_session *s = calloc(1, sizeof(struct http_session));
@@ -120,8 +121,6 @@ static struct http_session *create_http_session(const char *username, const stru
 	s->last_used = mg_time();
 	s->username = strdup(username);
 	
-	/* Create an ID by putting various volatiles into a pot and stirring. */
-	cs_sha1_ctx ctx;
 	cs_sha1_init(&ctx);
 	cs_sha1_update(&ctx, (const unsigned char *)hm->message.p, hm->message.len);
 	cs_sha1_update(&ctx, (const unsigned char *)s, sizeof(*s));
