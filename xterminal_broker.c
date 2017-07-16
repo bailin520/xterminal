@@ -15,7 +15,7 @@ const char *http_auth[MAX_HTTP_AUTH] = {"xterminal:xterminal"};
 
 static struct mg_serve_http_opts http_server_opts = {
 	.index_files = "xterminal.html",
-	.document_root = "www"
+	.document_root = "/etc/xterminal/www"
 };
 
 #define HTTP_SESSION_COOKIE_NAME "mgs"
@@ -584,10 +584,10 @@ static  void usage(const char *program)
 	printf("     -d              Log to stderr\n"
         "     --mqtt-port     default is 1883\n"
         "     --http-port     default is 8443\n"
-        "     --document      default is ./www\n"
+        "     --document      default is /etc/xterminal/www\n"
         "     --http-auth     set http auth(username:password), default is xterminal:xterminal\n"
-        "     --ssl-cert      default is ./server.pem\n"
-        "     --ssl-key       default is ./server.key\n");
+        "     --ssl-cert      default is /etc/xterminal/server.pem\n"
+        "     --ssl-key       default is /etc/xterminal/server.key\n");
 	
 	exit(0);
 }
@@ -598,12 +598,11 @@ int main(int argc, char *argv[])
 	ev_signal sig_watcher;
 	int log_to_stderr = 0;
 	const char *mqtt_port = "1883", *http_port = "8443";
-	const char *ssl_cert = "server.pem", *ssl_key = "server.key";
+	const char *ssl_cert = "/etc/xterminal/server.pem", *ssl_key = "/etc/xterminal/server.key";
 	int http_auth_cnt = 1;
 	struct mg_bind_opts bind_opts;
 	static ev_timer http_session_timer;
 	static ev_timer device_timer;
-	
 	struct mg_mgr mgr;
 	struct mg_connection *nc;
 	struct option longopts[] = {
