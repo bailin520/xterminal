@@ -29,8 +29,28 @@ struct tty_session {
 	struct mbuf send_mbuf;
 	char topic_data[128];
 	char topic_disconnect[128];
+	char topic_upfile[128];
 	struct list_head node;
 };
+
+struct upfile_param {
+	struct tty_session *s;
+	char *filename;
+};
+
+static void wait_child(pid_t pid)
+{
+	int status = 0;
+	waitpid(pid, &status, 0);
+#if 0		
+	if (WIFEXITED(status))
+		printf("child process %d exited:%d\n", pid, WEXITSTATUS(status));
+	else if (WIFSIGNALED(status))
+		printf("child process %d killed:%d\n", pid, WTERMSIG(status));
+	else if (WIFSTOPPED(status))
+		printf("child process %d stopped:%d\n", pid, WSTOPSIG(status));
+#endif	
+}
 
 static void ev_read_cb(struct ev_loop *loop, ev_io *w, int revents)
 {
@@ -43,7 +63,7 @@ static void ev_read_cb(struct ev_loop *loop, ev_io *w, int revents)
 		mg_mqtt_publish(s->nc, s->topic_data, 0, 0, buf, len);
 	} else {
 		ev_io_stop(loop, w);
-		waitpid(s->pid, NULL, 0);
+		wait_child(s->pid);
 		mg_mqtt_publish(s->nc, s->topic_disconnect, 0, 0, NULL, 0);
 	}
 }
@@ -89,6 +109,7 @@ static struct tty_session *create_tty_session(struct mg_connection *nc, uint64_t
 	
 	snprintf(s->topic_data, sizeof(s->topic_data), "xterminal/touser/data/%"INT64_X_FMT, s->sid);
 	snprintf(s->topic_disconnect, sizeof(s->topic_disconnect), "xterminal/touser/disconnect/%"INT64_X_FMT, s->sid);
+	snprintf(s->topic_upfile, sizeof(s->topic_upfile), "xterminal/uploadfilefinish/%"INT64_X_FMT, s->sid);
 	
 	ev_io_init(&s->ior, ev_read_cb, s->pty, EV_READ);
 	s->ior.data = s;
@@ -108,9 +129,10 @@ static struct tty_session *find_tty_session_by_sid(uint64_t sid)
 }
 
 static void destroy_tty_session(struct ev_loop *loop, struct tty_session *s)
-{
-	ev_io_stop(loop, &s->ior);
+{	
+	ev_io_stop(loop, &s->ior);	
 	kill(s->pid, SIGKILL);
+	wait_child(s->pid);
 	list_del(&s->node);
 	free(s);
 }
@@ -119,6 +141,44 @@ static void heartbeat_timer_cb(struct ev_loop *loop, ev_timer *w, int revents)
 {
 	struct mg_connection *nc = (struct mg_connection *)w->data;
 	mg_mqtt_publish(nc, heartbeat_topic, 0, 0, NULL, 0);
+}
+
+static void http_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
+{
+	switch (ev) {
+	case MG_EV_HTTP_REPLY: {
+			struct http_message *hm = (struct http_message *)ev_data;
+			int len, fd;
+			struct upfile_param *param = (struct upfile_param *)nc->user_data;
+			struct tty_session *s = param->s;
+			
+			fd = open(param->filename, O_WRONLY | O_CREAT, 0644);
+			if (fd > 0) {
+				while (1) {
+					len = write(fd, hm->body.p, hm->body.len);
+					if (len < 0) {
+						syslog(LOG_ERR, "write %s failed:%s", param->filename, strerror(errno));
+						break;
+					}
+					
+					if (len == hm->body.len)
+						break;
+					
+					hm->body.len -= len;
+					hm->body.p += len;
+				}
+				close(fd);
+			} else {
+				syslog(LOG_ERR, "open %s failed:%s", param->filename, strerror(errno));
+			}
+			
+			nc->flags |= MG_F_CLOSE_IMMEDIATELY;
+			mg_mqtt_publish(s->nc, s->topic_upfile, 0, 0, NULL, 0);
+			free(param->filename);
+			free(param);
+			break;
+		}
+	}
 }
 
 static void ev_handler(struct mg_connection *nc, int ev, void *ev_data)
@@ -167,7 +227,13 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 			
 			//printf("Got incoming message %.*s: %.*s\n", (int) msg->topic.len, msg->topic.p, (int) msg->payload.len, msg->payload.p);
 			
-			if (memmem(msg->topic.p + 9, msg->topic.len - 9, "connect", strlen("connect"))) {
+			if (memmem(msg->topic.p + 9, msg->topic.len - 9, "todev/disconnect", strlen("todev/disconnect"))) {
+				memcpy(ssid, msg->topic.p + 27, 16);
+				sid = strtoull(ssid, NULL, 16);
+				s = find_tty_session_by_sid(sid);
+				if (s)
+					destroy_tty_session(nc->mgr->loop, s);
+			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "connect", strlen("connect"))) {
 				memcpy(ssid, msg->topic.p + 31, 16);
 				sid = strtoull(ssid, NULL, 16);
 				create_tty_session(nc, sid);
@@ -181,16 +247,35 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 						syslog(LOG_ERR, "write error:%s", strerror(errno));
 					}
 				}
-			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "todev/disconnect", strlen("todev/disconnect"))) {
-				memcpy(ssid, msg->topic.p + 27, 16);
+			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "uploadfile", strlen("uploadfile"))) {
+				char *p, url[128] = "";
+				struct mg_connection *ncc;
+				
+				memcpy(ssid, msg->topic.p + 21, 16);
 				sid = strtoull(ssid, NULL, 16);
 				s = find_tty_session_by_sid(sid);
-				if (s)
-					destroy_tty_session(nc->mgr->loop, s);
-			} else if (memmem(msg->topic.p + 9, msg->topic.len - 9, "uploadfile", strlen("uploadfile"))) {
-				
+				if (!s)
+					return;
+
+				p = memchr(msg->payload.p, ' ', msg->payload.len);
+				if (!p)
+					return;
+				*p = 0;
+				strcpy(url, msg->payload.p);
+				strcat(url, "/");
+				snprintf(url + strlen(url), sizeof(url) - strlen(url), "%.*s", (int)(msg->payload.len - strlen(url)), p + 1);
+				ncc = mg_connect_http(nc->mgr, http_ev_handler, url, NULL, NULL);
+				if (ncc) {
+					struct upfile_param *param = malloc(sizeof(struct upfile_param));
+					char *filename = calloc(1, msg->payload.len + msg->payload.p - p + 5);
+					memcpy(filename, "/tmp/", 5);
+					memcpy(filename + 5, p + 1, msg->payload.len + msg->payload.p - p - 1);
+					
+					param->filename = filename;
+					param->s = s;
+					ncc->user_data = param;
+				}
 			}
-			
 			break;
 		}
 	}

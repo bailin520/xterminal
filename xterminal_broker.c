@@ -248,7 +248,6 @@ static void http_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 	switch (ev) {
 	case MG_EV_HTTP_REQUEST: {
 			struct http_message *hm = (struct http_message *)ev_data;
-			
 			if (uploadfile_name[0] && !strncmp(hm->uri.p + 1, uploadfile_name, strlen(uploadfile_name))) {
 				mg_serve_http(nc, hm, http_server_opts); 
 				return;
