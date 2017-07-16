@@ -26,7 +26,9 @@ case $1 in
 		
 		log_daemon_msg "Starting xterminal daemon" xterminal
 
-		if ! start-stop-daemon --start --quiet --oknodo --make-pidfile --pidfile $XTERMINALPID --background --exec /usr/sbin/xterminal_broker.lua; then
+		if ! start-stop-daemon --start --quiet --oknodo --make-pidfile --pidfile $XTERMINALPID --background \
+					--exec /usr/local/sbin/xterminal_broker -- \
+					--httpauth xterminal:xterminal; then
 			log_end_msg 1
 			exit 1
 		fi
@@ -59,7 +61,7 @@ case $1 in
 		$0 start
 		;;
 	status)
-		status_of_proc -p $XTERMINALPID /usr/sbin/xterminal_broker.lua xterminal_broker.lua
+		status_of_proc -p $XTERMINALPID /usr/local/sbin/xterminal_broker xterminal_broker
 		exit $?
 		;;
 	*)

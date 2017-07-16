@@ -585,7 +585,7 @@ static  void usage(const char *program)
         "     --mqtt-port     default is 1883\n"
         "     --http-port     default is 8443\n"
         "     --document      default is /etc/xterminal/www\n"
-        "     --http-auth     set http auth(username:password), default is xterminal:xterminal\n"
+        "     --httpauth     set http auth(username:password), default is xterminal:xterminal\n"
         "     --ssl-cert      default is /etc/xterminal/server.pem\n"
         "     --ssl-key       default is /etc/xterminal/server.key\n");
 	
@@ -599,7 +599,7 @@ int main(int argc, char *argv[])
 	int log_to_stderr = 0;
 	const char *mqtt_port = "1883", *http_port = "8443";
 	const char *ssl_cert = "/etc/xterminal/server.pem", *ssl_key = "/etc/xterminal/server.key";
-	int http_auth_cnt = 1;
+	int http_auth_cnt = 0;
 	struct mg_bind_opts bind_opts;
 	static ev_timer http_session_timer;
 	static ev_timer device_timer;
@@ -610,7 +610,7 @@ int main(int argc, char *argv[])
 		{"mqtt-port", required_argument, NULL, 0},
 		{"http-port", required_argument, NULL, 0},
 		{"document", required_argument, NULL, 0},
-		{"http-auth", required_argument, NULL, 0},
+		{"httpauth", required_argument, NULL, 0},
 		{"ssl-cert", required_argument, NULL, 0},
 		{"ssl-key", required_argument, NULL, 0},
 		{0, 0, 0, 0}
@@ -633,7 +633,7 @@ int main(int argc, char *argv[])
 				http_port = optarg;
 			else if (!strcmp(longopts[option_index].name, "document"))
 				http_server_opts.document_root = optarg;
-			else if (!strcmp(longopts[option_index].name, "http-auth")) {
+			else if (!strcmp(longopts[option_index].name, "httpauth")) {
 				if (http_auth_cnt < MAX_HTTP_AUTH)
 					http_auth[http_auth_cnt++] = optarg;
 			} else if (!strcmp(longopts[option_index].name, "ssl-cert"))
