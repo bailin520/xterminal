@@ -23,23 +23,17 @@ two parts, server and client.
 ### Install dependency
 * [evmongoose](https://github.com/zhaojh329/evmongoose/blob/master/README.md)
 
-* lua-cjson mosquitto
+* mosquitto
 
-		sudo apt install lua-cjson mosquitto
+		sudo apt install mosquitto
 
 ### Install xTerminal Server
     git clone https://github.com/zhaojh329/xterminal.git
-    cd xterminal/ubuntu
+	cd xterminal
+	git co c
+	cmake . && sudo make install
+    cd ubuntu
 	sudo make install
-
-### Modify config(/etc/xterminal/xterminal.conf)
-	mqtt-port=1883
-	http-port=8443
-	document=/etc/xterminal/web
-	http-username=xterminal
-	http-password=xterminal
-	ssl-cert=/etc/xterminal/server.pem
-	ssl-key=/etc/xterminal/server.key
 
 ### Run Server on Ubuntu
 	sudo /etc/init.d/xterminal start
@@ -50,7 +44,8 @@ two parts, server and client.
 	cp -r evmongoose/openwrt openwrt_dir/package/evmongoose
 	
 	git clone https://github.com/zhaojh329/xterminal.git
-	cp -r xterminal/openwrt openwrt_dir/package/xterminal
+	cd xterminal && git co c
+	cp -r openwrt openwrt_dir/package/xterminal-c
 	
 	cd openwrt_dir
 	./scripts/feeds update -a
@@ -59,7 +54,7 @@ two parts, server and client.
 	make menuconfig
 	Utilities  --->
 		Terminal  --->
-			<*> xterminal
+			<*> xterminal-c
 	
 	# to upload file to device, must be select ssl
 	Libraries  --->

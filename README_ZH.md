@@ -22,24 +22,17 @@ xTerminal是一个多终端的远程Web Shell工具。有了它，你可以在�
 ### 安装依赖
 * [evmongoose](https://github.com/zhaojh329/evmongoose/blob/master/README_ZH.md)
 
-* lua-cjson mosquitto
+* mosquitto
 
-		sudo apt install lua-cjson mosquitto
+		sudo apt install mosquitto
 	
 ### 安装 xTerminal Server
     git clone https://github.com/zhaojh329/xterminal.git
-    cd xterminal/ubuntu
+	cd xterminal && git co c
+	cmake . && sudo make install
+    cd ubuntu
 	sudo make install
 
-### 修改配置(/etc/xterminal/xterminal.conf)
-	mqtt-port=1883
-	http-port=8443
-	document=/etc/xterminal/web
-	http-username=xterminal
-	http-password=xterminal
-	ssl-cert=/etc/xterminal/server.pem
-	ssl-key=/etc/xterminal/server.key
-	
 ### 在Ubuntu上运行服务器
 	sudo /etc/init.d/xterminal start
 	
@@ -49,7 +42,8 @@ xTerminal是一个多终端的远程Web Shell工具。有了它，你可以在�
 	cp -r evmongoose/openwrt openwrt_dir/package/evmongoose
 	
 	git clone https://github.com/zhaojh329/xterminal.git
-	cp -r xterminal/openwrt openwrt_dir/package/xterminal
+	cd xterminal && git co c
+	cp -r openwrt openwrt_dir/package/xterminal-c
 	
 	cd openwrt_dir
 	./scripts/feeds update -a
@@ -58,7 +52,7 @@ xTerminal是一个多终端的远程Web Shell工具。有了它，你可以在�
 	make menuconfig
 	Utilities  --->
 		Terminal  --->
-			<*> xterminal
+			<*> xterminal-c
 	
 	# 上传文件到终端设备需要ssl支持
 	Libraries  --->
