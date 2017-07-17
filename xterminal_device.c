@@ -182,7 +182,7 @@ static void http_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 	}
 }
 
-static void ev_handler(struct mg_connection *nc, int ev, void *ev_data)
+static void mqtt_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 {
 	switch (ev) {
 	case MG_EV_CONNECT: {
@@ -193,6 +193,8 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 				syslog(LOG_ERR, "connect() failed: %s", strerror(err));
 				return;
 			}
+			
+			syslog(LOG_ERR, "connect %s ok", broker);
 			
 			memset(&opts, 0, sizeof(opts));
 			opts.flags |= MG_MQTT_CLEAN_SESSION;
@@ -384,7 +386,7 @@ int main(int argc, char *argv[])
 	ev_signal_init(&sig_watcher, signal_cb, SIGINT);
 	ev_signal_start(loop, &sig_watcher);
 
-	nc = mg_connect(&mgr, broker, ev_handler);
+	nc = mg_connect(&mgr, broker, mqtt_ev_handler);
 	if (!nc) {
 		syslog(LOG_ERR, "mg_connect(%s) failed", broker);
 		goto err;
